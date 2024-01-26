@@ -79,7 +79,7 @@ class QFunction(nn.Module):
     def forward(self, rgb_pcd, tar_rgb_pcd, proprio, pcd, tar_pcd, lang_goal_emb, lang_token_embs,
                 bounds=None, prev_bounds=None, prev_layer_voxel_grid=None,
                 generate=0, noisy_voxel_grid=None, masked_decoding=False,
-                masking_ratio=0.8, input_masking_ratio=0.5, masking_type='patch',
+                masking_ratio=0.8, input_masking_ratio=0.5, masking_type='patch', noise=None,
                 add_noise=True):
         # rgb_pcd will be list of list (list of [rgb, pcd])
 
@@ -164,6 +164,7 @@ class QFunction(nn.Module):
             bounds,
             prev_bounds,
             generate=generate,
+            noise=noise,
             add_noise=add_noise)
 
         # if generate:
@@ -380,7 +381,7 @@ class QAttentionPerActBCAgent(Agent):
                              align_corners=True)
         return crop
 
-    def _preprocess_inputs(self, replay_sample):
+    def _preprocess_inputs(self, replay_sample, choice):
         obs = []
         pcds = []
 
@@ -390,10 +391,8 @@ class QAttentionPerActBCAgent(Agent):
         for n in self._camera_names:
             rgb = replay_sample['%s_rgb' % n]
             pcd = replay_sample['%s_point_cloud' % n]
-
             tar_rgb = replay_sample['tar_%s_rgb' % n]
             tar_pcd = replay_sample['tar_%s_point_cloud' % n]
-
             # print('rgb:', torch.equal(rgb, tar_rgb))
             # print('pcd:', torch.equal(pcd, tar_pcd))
             # print('ori:', pcd.shape)
@@ -479,14 +478,22 @@ class QAttentionPerActBCAgent(Agent):
         return voxel_grid.permute(0, 4, 1, 2, 3).detach()
 
     def update(self, step: int, replay_sample: dict) -> dict:
-        action_trans = replay_sample['trans_action_indicies'][:, self._layer * 3:self._layer * 3 + 3].int()
-        action_rot_grip = replay_sample['rot_grip_action_indicies'].int()
-        action_gripper_pose = replay_sample['gripper_pose']
-        action_ignore_collisions = replay_sample['ignore_collisions'].int()
+        num_demos = 10
+        choice = random.randint(0, num_demos - 2)
+        trans = replay_sample['trans_action_indicies'].permute(1, 0, 2)
+        rot = replay_sample['rot_grip_action_indicies'].permute(1, 0, 2)
+        gripper = replay_sample['gripper_pose'].permute(1, 0, 2)
+        ig_col = replay_sample['ignore_collisions'].permute(1, 0, 2)
+        action_trans = trans[choice][:, self._layer * 3:self._layer * 3 + 3].int()
+        action_rot_grip = rot[choice].int()
+        action_gripper_pose = gripper[choice]
+        action_ignore_collisions = ig_col[choice].int()
         lang_goal_emb = replay_sample['lang_goal_emb'].float()
         lang_token_embs = replay_sample['lang_token_embs'].float()
         prev_layer_voxel_grid = replay_sample.get('prev_layer_voxel_grid', None)
         prev_layer_bounds = replay_sample.get('prev_layer_bounds', None)
+        noise = replay_sample['noises'].permute(1, 0, 2, 3)[choice]
+        # print('noise:', noise.shape)
         device = self._device
         # print(os.getcwd())
         # if not os.path.exists('errors') and len(error_terms) != 0:
@@ -502,7 +509,14 @@ class QAttentionPerActBCAgent(Agent):
         if self._include_low_dim_state:
             proprio = replay_sample['low_dim_state']
 
-        obs, pcd, tar_obs, tar_pcd = self._preprocess_inputs(replay_sample)
+        for cname in self._camera_names:
+            replay_sample.pop('tar_%s_rgb_tp1' % cname)
+            replay_sample.pop('tar_%s_point_cloud_tp1' % cname)
+
+        for cname in self._camera_names:
+            replay_sample['tar_%s_rgb' % cname] = replay_sample['tar_%s_rgb' % cname].permute(1, 0, 2, 3, 4)[choice]
+            replay_sample['tar_%s_point_cloud' % cname] = replay_sample['tar_%s_point_cloud' % cname].permute(1, 0, 2, 3, 4)[choice]
+        obs, pcd, tar_obs, tar_pcd = self._preprocess_inputs(replay_sample, choice)
 
         # batch size
         bs = pcd[0].shape[0]
@@ -556,6 +570,7 @@ class QAttentionPerActBCAgent(Agent):
                                  masking_ratio=self.masking_ratio,
                                  masking_type=self.masking_type,
                                  input_masking_ratio=self.input_masking_ratio,
+                                 noise=noise,
                                  add_noise=True)
 
         # print(torch.equal(voxel_grid, tar_voxel_grid))
@@ -1154,9 +1169,9 @@ class QAttentionPerActBCAgent(Agent):
 
         for n, v in self._summaries.items():
             summaries.append(ScalarSummary('%s/%s' % (self._name, n), v))
-
         for (name, crop) in (self._crop_summary):
             crops = (torch.cat(torch.split(crop, 3, dim=1), dim=3) + 1.0) / 2.0
+
             summaries.extend([
                 ImageSummary('%s/crops/%s' % (self._name, name), crops)])
 

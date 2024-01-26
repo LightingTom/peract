@@ -50,6 +50,7 @@ def create_replay(batch_size: int, timesteps: int,
     max_token_seq_len = 77
     lang_feat_dim = 1024
     lang_emb_dim = 512
+    num_demo = 10
 
     # low_dim_state
     observation_elements = []
@@ -69,24 +70,26 @@ def create_replay(batch_size: int, timesteps: int,
             ObservationElement('%s_camera_intrinsics' % cname, (3, 3,), np.float32))
 
         observation_elements.append(
-            ObservationElement('tar_%s_rgb' % cname, (3, *image_size,), np.float32))
+            ObservationElement('tar_%s_rgb' % cname, (num_demo - 1, 3, *image_size,), np.float32))
         observation_elements.append(
-            ObservationElement('tar_%s_point_cloud' % cname, (3, *image_size),
+            ObservationElement('tar_%s_point_cloud' % cname, (num_demo - 1, 3, *image_size),
                                np.float32))  # see pyrep/objects/vision_sensor.py on how pointclouds are extracted from depth frames
         observation_elements.append(
-            ObservationElement('tar_%s_camera_extrinsics' % cname, (4, 4,), np.float32))
+            ObservationElement('tar_%s_camera_extrinsics' % cname, (num_demo - 1, 4, 4,), np.float32))
         observation_elements.append(
-            ObservationElement('tar_%s_camera_intrinsics' % cname, (3, 3,), np.float32))
+            ObservationElement('tar_%s_camera_intrinsics' % cname, (num_demo - 1, 3, 3,), np.float32))
 
     # discretized translation, discretized rotation, discrete ignore collision, 6-DoF gripper pose, and pre-trained language embeddings
     observation_elements.extend([
-        ReplayElement('trans_action_indicies', (trans_indicies_size,),
+        ReplayElement('trans_action_indicies', (num_demo - 1, trans_indicies_size,),
                       np.int32),
-        ReplayElement('rot_grip_action_indicies', (rot_and_grip_indicies_size,),
+        ReplayElement('rot_grip_action_indicies', (num_demo - 1, rot_and_grip_indicies_size,),
                       np.int32),
-        ReplayElement('ignore_collisions', (ignore_collisions_size,),
+        ReplayElement('ignore_collisions', (num_demo - 1, ignore_collisions_size,),
+                      np.float32),
+        ReplayElement('noises', (num_demo - 1, 64, 64),
                       np.int32),
-        ReplayElement('gripper_pose', (gripper_pose_size,),
+        ReplayElement('gripper_pose', (num_demo - 1, gripper_pose_size,),
                       np.float32),
         ReplayElement('lang_goal_emb', (lang_feat_dim,),
                       np.float32),
@@ -165,11 +168,11 @@ def _add_keypoints_to_replay(
         task: str,
         replay: ReplayBuffer,
         inital_obs: Observation,
-        tar_obs,
+        tar_obs_list,
         demo: Demo,
-        tar_demo,
+        tar_demo_list,
         episode_keypoints: List[int],
-        tar_episode_keypoints,
+        tar_episode_keypoints_list,
         cameras: List[str],
         rlbench_scene_bounds: List[float],
         voxel_sizes: List[int],
@@ -179,69 +182,77 @@ def _add_keypoints_to_replay(
         description: str = '',
         clip_model=None,
         device='cpu'):
-    prev_action = None
+    prev_action = [None for _ in range(len(tar_demo_list))]
+    prev_action_ = None
     obs = inital_obs
-    # obs and tar_obs are the same
-    # if not np.array_equal(obs.front_rgb, tar_obs.front_rgb):
-    #     print('front')
-    # if not np.array_equal(obs.left_shoulder_rgb, tar_obs.left_shoulder_rgb):
-    #     print('left_shoulder')
-    # if not np.array_equal(obs.right_shoulder_rgb, tar_obs.right_shoulder_rgb):
-    #     print('right_shoulder')
-    # if not np.array_equal(obs.wrist_rgb, tar_obs.wrist_rgb):
-    #     print('wrist')
-    # print('finish checking')
+    noises = np.random.normal(0, 1, size=(10-1, 64, 64))
     for k, keypoint in enumerate(episode_keypoints):
-        if k >= len(tar_episode_keypoints) - 1:
-            tar_kp = keypoint
-        else:
-            tar_kp = tar_episode_keypoints[k]
         obs_tp1 = demo[keypoint]
-        if tar_kp >= len(tar_demo):
-            tar_tp1 = tar_demo[tar_episode_keypoints[-1]]
-        else:
-            tar_tp1 = tar_demo[tar_kp]
-        if tar_kp >= len(tar_demo):
-            tar_tm1 = tar_demo[tar_episode_keypoints[-1]]
-        else:
-            tar_tm1 = tar_demo[max(0, tar_kp - 1)]
+        tar_kp_list = []
+        tar_tp1_list = []
+        tar_tm1_list = []
+        for idx in range(len(tar_demo_list)):
+            if k >= len(tar_episode_keypoints_list[idx]) - 1:
+                tar_kp = keypoint
+            else:
+                tar_kp = tar_episode_keypoints_list[idx][k]
+            tar_kp_list.append(tar_kp)
+            if tar_kp_list[-1] >= len(tar_demo_list[idx]):
+                tar_tp1 = tar_demo_list[idx][tar_episode_keypoints_list[idx][-1]]
+            else:
+                tar_tp1 = tar_demo_list[idx][tar_kp_list[-1]]
+            tar_tp1_list.append(tar_tp1)
+            if tar_kp_list[-1] >= len(tar_demo_list[idx]):
+                tar_tm1 = tar_demo_list[idx][tar_episode_keypoints_list[idx][-1]]
+            else:
+                tar_tm1 = tar_demo_list[idx][max(0, tar_kp_list[-1] - 1)]
+            tar_tm1_list.append(tar_tm1)
         obs_tm1 = demo[max(0, keypoint - 1)]
+        # ori
+        _, _, _, action_, _ = _get_action(obs_tp1, obs_tm1, rlbench_scene_bounds, voxel_sizes, bounds_offset,
+                                          rotation_resolution, crop_augmentation)
+        # ver 1221
         # trans_indicies, rot_grip_indicies, ignore_collisions, action, attention_coordinates = _get_action(
-        #     obs_tp1, obs_tm1, rlbench_scene_bounds, voxel_sizes, bounds_offset,
+        #     tar_tp1, tar_tm1, rlbench_scene_bounds, voxel_sizes, bounds_offset,
         #     rotation_resolution, crop_augmentation)
-        trans_indicies, rot_grip_indicies, ignore_collisions, action, attention_coordinates = _get_action(
-            tar_tp1, tar_tm1, rlbench_scene_bounds, voxel_sizes, bounds_offset,
-            rotation_resolution, crop_augmentation)
+        trans_list = []
+        rot_grip_list = []
+        ignore_collision_list = []
+        action_list = []
+        attention_coor_list = []
+        for idx in range(len(tar_demo_list)):
+            trans_indicies, rot_grip_indicies, ignore_collisions, action, attention_coordinates = _get_action(
+                tar_tp1_list[idx], tar_tm1_list[idx], rlbench_scene_bounds, voxel_sizes, bounds_offset,
+                rotation_resolution, crop_augmentation)
+            trans_list.append(trans_indicies)
+            rot_grip_list.append(rot_grip_indicies)
+            ignore_collision_list.append(ignore_collisions)
+            action_list.append(action)
+            attention_coor_list.append(attention_coordinates)
+
 
         terminal = (k == len(episode_keypoints) - 1)
         reward = float(terminal) * REWARD_SCALE if terminal else 0
 
-        obs_dict = utils.extract_obs(obs, t=k, prev_action=prev_action,
+        obs_dict = utils.extract_obs(obs, t=k, prev_action=prev_action_,
                                      cameras=cameras, episode_length=cfg.rlbench.episode_length, name='ori')
-        tar_dict = utils.extract_obs(tar_obs, t=k, prev_action=prev_action,
-                                     cameras=cameras, episode_length=cfg.rlbench.episode_length, name='tar')
-        # for key in obs_dict.keys():
-        #     if not 'rgb' in key and not 'pcd' in key:
-        #         continue
-        #     print('------------------------------------------------')
-        #     print('%s:' % key)
-        #     if isinstance(obs_dict[key], np.ndarray):
-        #         if not np.array_equal(obs_dict[key], tar_dict[key]):
-        #             print(key)
-        #     else:
-        #         if not obs_dict[key] == tar_dict[key]:
-        #             print(key)
-        #     print('------------------------------------------------')
-        tar = {}
-        for key in tar_dict.keys():
-            if key not in ['ignore_collisions', 'low_dim_state']:
-                tar['tar_' + key] = tar_dict[key]
-        # print('--------------------------------------------------------------------')
-        # for c in cameras:
-        #     print(c, ':')
-        #     print(np.array_equal(tar['tar_%s_rgb' % c], obs_dict['%s_rgb' % c]))
-        #     # print(tar['tar_%s_point_cloud' % c] == obs_dict['%s_point_cloud' % c])
-        # print('--------------------------------------------------------------------')
+        tar_list = []
+        for idx in range(len(tar_obs_list)):
+            tar_dict = utils.extract_obs(tar_obs_list[idx], t=k, prev_action=prev_action[idx],
+                                         cameras=cameras, episode_length=cfg.rlbench.episode_length, name='tar')
+            tar = {}
+            for key in tar_dict.keys():
+                if key not in ['low_dim_state']:
+                    tar['tar_' + key] = tar_dict[key]
+            tar_list.append(tar)
+        tar_combine = {}
+        for tar_key in tar_list[0].keys():
+            items = []
+            for idx in range(len(tar_list)):
+                items.append(tar_list[idx][tar_key])
+            tar_combine[tar_key] = np.stack(items, axis=0)
+        # tar_combine['ignore_collisions'] = np.stack(ignore_collision_list, axis=0).reshape((-1, 1))
+        tar_combine['ignore_collisions'] = tar_combine.pop('tar_ignore_collisions')
         tokens = tokenize([description]).numpy()
         token_tensor = torch.from_numpy(tokens).to(device)
         sentence_emb, token_embs = clip_model.encode_text_with_embeddings(token_tensor)
@@ -251,52 +262,60 @@ def _add_keypoints_to_replay(
             print('clip nan', description)
             continue
 
-        prev_action = np.copy(action)
+        prev_action_ = np.copy(action_)
+        for idx in range(len(prev_action)):
+            prev_action[idx] = np.copy(action_list[idx])
 
         others = {'demo': True,
                   'test_task': True if 'test' in task else False
                   }
 
+        gripper_pose_list = []
+        for idx in range(len(tar_tp1_list)):
+            gripper_pose_list.append(tar_tp1_list[idx].gripper_pose)
         final_obs = {
-            'trans_action_indicies': trans_indicies,
-            'rot_grip_action_indicies': rot_grip_indicies,
-            'gripper_pose': tar_tp1.gripper_pose,
+            'trans_action_indicies': np.stack(trans_list, axis=0),
+            'rot_grip_action_indicies': np.stack(rot_grip_list, axis=0),
+            'gripper_pose': np.stack(gripper_pose_list, axis=0),
+            'noises': noises,
             'task': task,
             'lang_goal': np.array([description], dtype=object),
-            # 'voxel_reconstructed': np.zeros([10, cfg.method.voxel_sizes[0], 
-            #                                 cfg.method.voxel_sizes[0], cfg.method.voxel_sizes[0]]),
         }
-        final_obs.update(tar)
+        final_obs.update(tar_combine)
 
-        others.update(final_obs)
         others.update(obs_dict)
-        # for keys, values in others.items():
-        #     try: 
-        #         print(keys, values.shape)
-        #     except:
-        #         print(keys, values)
-
+        others.update(final_obs)
         # import ipdb; ipdb.set_trace()
         timeout = False
-        replay.add(action, reward, terminal, timeout, **others)
+        replay.add(action_, reward, terminal, timeout, **others)
         obs = obs_tp1
-        tar_obs = tar_tp1
+        tar_obs_list = tar_tp1_list
 
     # final step
-    obs_dict_tp1 = utils.extract_obs(obs_tp1, t=k + 1, prev_action=prev_action,
+    obs_dict_tp1 = utils.extract_obs(obs_tp1, t=k + 1, prev_action=prev_action_,
                                      cameras=cameras, episode_length=cfg.rlbench.episode_length)
 
-    tar_dict_tp1 = utils.extract_obs(tar_tp1, t=k + 1, prev_action=prev_action,
-                                     cameras=cameras, episode_length=cfg.rlbench.episode_length)
-    tar_tp1 = {}
-    for key in obs_dict_tp1.keys():
-        if key not in ['ignore_collisions', 'low_dim_state']:
-            tar_tp1['tar_' + key] = tar_dict_tp1[key]
+    tar_dict_tp1_list = []
+    for idx in range(len(tar_tp1_list)):
+        tar_dict_tp1 = utils.extract_obs(tar_tp1_list[idx], t=k + 1, prev_action=prev_action,
+                                         cameras=cameras, episode_length=cfg.rlbench.episode_length)
+        tar_tp1 = {}
+        for key in obs_dict_tp1.keys():
+            if key not in ['low_dim_state']:
+                tar_tp1['tar_' + key] = tar_dict_tp1[key]
+        tar_dict_tp1_list.append(tar_tp1)
+    tar_tp1_combine = {}
+    for tar_key in tar_dict_tp1_list[0].keys():
+        items = []
+        for idx in range(len(tar_dict_tp1_list)):
+            items.append(tar_dict_tp1_list[idx][tar_key])
+        tar_tp1_combine[tar_key] = np.stack(items, axis=0)
+    tar_tp1_combine['ignore_collisions'] = tar_tp1_combine.pop('tar_ignore_collisions')
     obs_dict_tp1['lang_goal_emb'] = sentence_emb[0].float().detach().cpu().numpy()
     obs_dict_tp1['lang_token_embs'] = token_embs[0].float().detach().cpu().numpy()
 
     obs_dict_tp1.pop('wrist_world_to_cam', None)
-    final_obs.update(tar_tp1)
+    final_obs.update(tar_tp1_combine)
     obs_dict_tp1.update(final_obs)
     replay.add_final(**obs_dict_tp1)
 
@@ -339,34 +358,28 @@ def fill_replay(cfg: DictConfig,
             name='ori_obs')[0]
         # load the target image
         # randomly get a new directory
-        tar_idx = random.randint(0, cfg.rlbench.demos - 1)
-        tar_demo = rlbench_utils.get_stored_demos(
-            amount=1, image_paths=False,
-            dataset_root=cfg.rlbench.demo_path,
-            variation_number=-1, task_name=task,
-            obs_config=obs_config,
-            random_selection=False,
-            from_episode_number=tar_idx,
-            name='tar_obs')[0]
+        tar_demo_list = []
+        for i in range(num_demos):
+            if i == d_idx:
+                continue
+            target = rlbench_utils.get_stored_demos(
+                    amount=1, image_paths=False,
+                    dataset_root=cfg.rlbench.demo_path,
+                    variation_number=-1, task_name=task,
+                    obs_config=obs_config,
+                    random_selection=False,
+                    from_episode_number=i,
+                    name='tar_obs')[0]
+            tar_demo_list.append(target)
 
         descs = demo._observations[0].misc['descriptions']
-        # # check the return value for get_stored_demo
-        # ori_obs = demo
-        # tar_obs = tar_demo
-        # for i in range(len(ori_obs)):
-        #     if not np.array_equal(ori_obs[i].front_rgb, tar_obs[i].front_rgb):
-        #         print(i, 'front')
-        #     if not np.array_equal(ori_obs[i].left_shoulder_rgb, tar_obs[i].left_shoulder_rgb):
-        #         print(i, 'left_shoulder')
-        #     if not np.array_equal(ori_obs[i].right_shoulder_rgb, tar_obs[i].right_shoulder_rgb):
-        #         print(i, 'right_shoulder')
-        #     if not np.array_equal(ori_obs[i].wrist_rgb, tar_obs[i].wrist_rgb):
-        #         print(i, 'wrist')
-        # print('finish checking obs')
 
         # extract keypoints (a.k.a keyframes)
         episode_keypoints = demo_loading_utils.keypoint_discovery(demo, method=keypoint_method)
-        tar_episode_keypoints = demo_loading_utils.keypoint_discovery(tar_demo, method=keypoint_method)
+        tar_episode_keypoints_list = []
+        for i in range(len(tar_demo_list)):
+            tar_episode_keypoints_list.append(
+                demo_loading_utils.keypoint_discovery(tar_demo_list[i], method=keypoint_method))
 
         if rank == 0:
             logging.info(f"Loading Demo({d_idx}) - found {len(episode_keypoints)} keypoints - {task}")
@@ -380,51 +393,28 @@ def fill_replay(cfg: DictConfig,
             # import ipdb; ipdb.set_trace()
             obs = demo[i]
             # get the target demo according to the ratio
-            frag = len(tar_demo) / len(demo)
-            idx = int(i * frag)
-            tar = tar_demo[idx]
-            # obs are the same
-            # if not np.array_equal(obs.front_rgb, tar.front_rgb):
-            #     print(i, 'front')
-            # if not np.array_equal(obs.left_shoulder_rgb, tar.left_shoulder_rgb):
-            #     print(i, 'left_shoulder')
-            # if not np.array_equal(obs.right_shoulder_rgb, tar.right_shoulder_rgb):
-            #     print(i, 'right_shoulder')
-            # if not np.array_equal(obs.wrist_rgb, tar.wrist_rgb):
-            #     print(i, 'wrist')
-            # print('finish checking obs')
-
-            # same
-            # obs_dict = vars(obs)
-            # tar_dict = vars(tar)
-            # diff = False
-            # if not np.array_equal(obs_dict['front_rgb'], tar_dict['front_rgb']):
-            #     diff = True
-            #     print(i, 'front')
-            # if not np.array_equal(obs_dict['left_shoulder_rgb'], tar_dict['left_shoulder_rgb']):
-            #     diff = True
-            #     print(i, 'left_shoulder')
-            # if not np.array_equal(obs_dict['right_shoulder_rgb'], tar_dict['right_shoulder_rgb']):
-            #     diff = True
-            #     print(i, 'right_shoulder')
-            # if not np.array_equal(obs_dict['wrist_rgb'], tar_dict['wrist_rgb']):
-            #     diff = True
-            #     print(i, 'wrist')
-            # if not diff:
-            #     print(i, 'finish checking')
-
+            tar_list = []
+            tar_zero = False
+            for t_idx in range(len(tar_demo_list)):
+                frag = len(tar_demo_list[t_idx]) / len(demo)
+                idx = int(i * frag)
+                tar_list.append(tar_demo_list[t_idx][idx])
+                for kp_idx in range(len(tar_episode_keypoints_list)):
+                    while len(tar_episode_keypoints_list[kp_idx]) > 0 and idx >= tar_episode_keypoints_list[kp_idx][0]:
+                        tar_episode_keypoints_list[kp_idx] = tar_episode_keypoints_list[kp_idx][1:]
+                    if len(tar_episode_keypoints_list[kp_idx]) == 0:
+                        tar_zero = True
             desc = random.choice(descs)
             # if our starting point is past one of the keypoints, then remove it
             while len(episode_keypoints) > 0 and i >= episode_keypoints[0]:
                 episode_keypoints = episode_keypoints[1:]
-            while len(tar_episode_keypoints) > 0 and idx >= tar_episode_keypoints[0]:
-                tar_episode_keypoints = tar_episode_keypoints[1:]
             if len(episode_keypoints) == 0:
                 break
-            if len(tar_episode_keypoints) == 0:
+            if tar_zero:
                 break
             _add_keypoints_to_replay(
-                cfg, task, replay, obs, tar, demo, tar_demo, episode_keypoints, tar_episode_keypoints,
+                cfg, task, replay, obs, tar_list, demo, tar_demo_list,
+                episode_keypoints, tar_episode_keypoints_list,
                 cameras, rlbench_scene_bounds, voxel_sizes, bounds_offset,
                 rotation_resolution, crop_augmentation, description=desc,
                 clip_model=clip_model, device=device)

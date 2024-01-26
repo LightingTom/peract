@@ -216,7 +216,7 @@ def run_seed(rank,
                 json.dump(replay_buffer._task_idxs.copy(), f)
             np.save(f"{replay_path}/store_terminal.npy", replay_buffer._store.copy())
 
-            print("replay size with actual+gnerated data", replay_buffer._add_count.value)
+            print("replay size with actual+genrated data", replay_buffer._add_count.value)
         
         agent = peract_bc.launch_utils.create_agent(cfg)
 

@@ -383,6 +383,7 @@ class PerceiverVoxelLangEncoder(nn.Module):
             prev_layer_bounds,
             mask=None,
             generate=0,
+            noise=None,
             add_noise=False
     ):  
         
@@ -487,7 +488,7 @@ class PerceiverVoxelLangEncoder(nn.Module):
                 # longer training
                 x_mean = x.mean()
                 x_var = x.var()
-                x = x + self.factor * torch.normal(0, 1.0, size=(x.shape[1], x.shape[2])).to(device)
+                x = x + self.factor * noise.to(device)
             
 
             # self-attention layers

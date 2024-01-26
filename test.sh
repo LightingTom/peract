@@ -1,13 +1,11 @@
-# export CUDA_VISIBLE_DEVICE=0
-
     python train.py \
     method.name=PERACT_BC \
     rlbench.tasks=[open_drawer] \
-    rlbench.task_name='fct1_0116' \
+    rlbench.task_name='test' \
     rlbench.cameras=[front,left_shoulder,right_shoulder,wrist] \
     rlbench.demos=10 \
     rlbench.demo_path=$PERACT_ROOT/data/ \
-    replay.batch_size=8 \
+    replay.batch_size=1 \
     replay.path=$PERACT_ROOT/replay/ \
     replay.max_parallel_processes=16 \
     replay.load_replay_from_disk=False \
@@ -23,16 +21,14 @@
     method.pos_encoding_with_lang=True \
     method.decode_occupnacy=True \
     method.decode_rgb=True \
-    method.factor=1 \
-    framework.training_iterations=200001 \
+    method.factor=5 \
+    framework.training_iterations=100 \
     framework.num_weights_to_keep=60 \
     framework.start_seed=0 \
-    framework.log_freq=2000 \
-    framework.save_freq=2000 \
+    framework.log_freq=10 \
+    framework.save_freq=10 \
     framework.logdir=$PERACT_ROOT/logs/ \
-    framework.load_existing_weights=False \
     framework.csv_logging=True \
     framework.tensorboard_logging=True \
     ddp.num_devices=1 \
-    ddp.master_port='29509'
-
+    ddp.master_port='29511'
