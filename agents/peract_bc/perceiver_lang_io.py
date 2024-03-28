@@ -200,6 +200,7 @@ class PerceiverVoxelLangEncoder(nn.Module):
         self.decode_occupnacy = decode_occupnacy
         self.decode_rgb = decode_rgb
         self.factor = factor
+        # self.vae = vae
 
 
         # patchified input dimensions
@@ -308,7 +309,7 @@ class PerceiverVoxelLangEncoder(nn.Module):
 
         flat_size += self.input_dim_before_seq * 4
 
-        ## voxel reconstruction
+        # voxel reconstruction
         if self.decode_occupnacy:
             self.voxel_decoder = Conv3DBlock( #self.final_dim
                 self.im_channels + self.final_dim, 1, kernel_sizes=3, strides=1,
@@ -321,7 +322,35 @@ class PerceiverVoxelLangEncoder(nn.Module):
                 norm=None, activation=activation,
             )
             self.normRGB = torch.nn.Tanh()
-        ##
+
+        # VAE part
+        # MLP for calculate mean and var
+        # TODO: change to the x's dim
+        vae_hidden = 64
+        self.mean_mlp = nn.Sequential(
+            nn.Linear(64*64, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(inplace=True),
+            nn.Linear(512, vae_hidden)
+        )
+        self.var_mlp = nn.Sequential(
+            nn.Linear(64*64, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(inplace=True),
+            nn.Linear(512, vae_hidden)
+        )
+        # self.vae_decoder = nn.Sequential(
+        #     nn.Linear(vae_hidden, 256),
+        #     nn.BatchNorm1d(256),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(256, 1024),
+        #     nn.BatchNorm1d(1024),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(1024, 2048),
+        #     nn.BatchNorm1d(2048),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(2048, 4096),
+        #     nn.Sigmoid())
 
         if not self.reconstruction3D_pretraining:
             # final 3D softmax
@@ -372,6 +401,19 @@ class PerceiverVoxelLangEncoder(nn.Module):
         return x.view(x.shape[0], x.shape[1],
                       self.voxel_size, self.voxel_size, self.voxel_size)
 
+    def single_sampling(self, mean, var):
+        device = torch.device(mean.device)
+        eps = torch.randn(mean.shape).to(device)
+        sigma = 0.5 * torch.exp(var)
+        return mean + eps * sigma
+
+    def n_sampling(self, n, mean, var):
+        sample_list = []
+        for i in range(n):
+            sample_list.append(self.single_sampling(mean, var))
+        return torch.stack(sample_list, dim=1)
+
+
     def forward(
             self,
             ins,
@@ -384,9 +426,10 @@ class PerceiverVoxelLangEncoder(nn.Module):
             mask=None,
             generate=0,
             noise=None,
-            add_noise=False
+            vae=True,
+            enc=True
     ):  
-        
+        # print('vae:', vae)
         # import ipdb; ipdb.set_trace()
         # preprocess input
         ins_initial = ins
@@ -466,6 +509,16 @@ class PerceiverVoxelLangEncoder(nn.Module):
 
         # batchify latents
         x = repeat(self.latents, 'n d -> b n d', b=b)
+        # VAE part
+        # var_input = x.view(x.shape[0], -1)
+        # # x_mean and x_var shape: b, 128
+        # vae_mean = self.mean_mlp(var_input)
+        # vae_var = self.var_mlp(var_input)
+        # # z shape: b, 128
+        # z = self.sampling(vae_mean, vae_var)
+        # # out shape: b, 64, 64
+        # vae_out = self.vae_decoder(z)
+        # vae_out = vae_out.view(vae_out.shape[0], 64, 64)
         # mean and var
         x_mean_init = x.mean()
         x_var_init = x.var()
@@ -480,7 +533,7 @@ class PerceiverVoxelLangEncoder(nn.Module):
             ## TODO: add noise only during data generation, not training
             x_mean = 0
             x_var = 0
-            if add_noise:
+            if not vae:
                 # print('noise added')
                 # TODO:
                 # add a factor (0.5, 5)
@@ -489,7 +542,7 @@ class PerceiverVoxelLangEncoder(nn.Module):
                 x_mean = x.mean()
                 x_var = x.var()
                 x = x + self.factor * noise.to(device)
-            
+
 
             # self-attention layers
             for self_attn, self_ff in self.layers:
@@ -497,9 +550,32 @@ class PerceiverVoxelLangEncoder(nn.Module):
                 x = self_ff(x) + x
 
         # decoder cross attention
-        latents = self.decoder_cross_attn(ins, context=x)
+        # print('x:', x.shape)
+        # x: b, 64, 64; 64, b, 64
+        # linear(b,64,64) = b,1,64
+        var_input = x.view(x.shape[0], -1)
+        # x_mean and x_var shape: b, 64, 1
+        # can replace by simply calculate mean and var
+        if enc:
+            vae_mean = self.mean_mlp(var_input).unsqueeze(2)
+            vae_var = self.var_mlp(var_input).unsqueeze(2)
+            print('vae_var:', vae_var.shape)
+        else:
+            vae_mean = torch.mean(x, dim=1).unsqueeze(2)
+            vae_var = torch.var(x, dim=1).unsqueeze(2)
+            # print('mean_shape:', vae_mean.shape, 'var_shape:', vae_var.shape)
+        # print('vae_mean:', vae_mean.shape, 'vae_var', vae_var.shape)
+        # sample 64 times
+        # z = self.sampling(vae_mean, vae_var)
+        z = self.n_sampling(64, vae_mean, vae_var).squeeze(3)
+        # z = self.single_sampling(vae_mean, vae_var)
+        # print('z:', z.shape)
+        # vae_out = self.vae_decoder(z)
+        # vae_out = vae_out.view(vae_out.shape[0], 64, 64)
+        # print('mean:', vae_mean.shape)
+        # print('vari:', vae_var.shape)
+        latents = self.decoder_cross_attn(ins, context=z)
 
-        # 
 
         # crop out the language part of the output sequence
         if self.lang_fusion_type == 'seq':
@@ -555,4 +631,5 @@ class PerceiverVoxelLangEncoder(nn.Module):
                 rot_and_grip_out = rot_and_grip_collision_out[:, :-self.num_collision_classes]
                 collision_out = rot_and_grip_collision_out[:, -self.num_collision_classes:]
 
-        return trans, rot_and_grip_out, collision_out, voxel_reconstructed, x_mean, x_var, x_mean_init, x_var_init
+        return trans, rot_and_grip_out, collision_out, voxel_reconstructed,\
+               vae_mean, vae_var, x_mean, x_var

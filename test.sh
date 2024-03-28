@@ -5,7 +5,7 @@
     rlbench.cameras=[front,left_shoulder,right_shoulder,wrist] \
     rlbench.demos=10 \
     rlbench.demo_path=$PERACT_ROOT/data/ \
-    replay.batch_size=1 \
+    replay.batch_size=2 \
     replay.path=$PERACT_ROOT/replay/ \
     replay.max_parallel_processes=16 \
     replay.load_replay_from_disk=False \
@@ -21,7 +21,7 @@
     method.pos_encoding_with_lang=True \
     method.decode_occupnacy=True \
     method.decode_rgb=True \
-    method.factor=5 \
+    method.factor=1 \
     framework.training_iterations=100 \
     framework.num_weights_to_keep=60 \
     framework.start_seed=0 \
@@ -30,5 +30,6 @@
     framework.logdir=$PERACT_ROOT/logs/ \
     framework.csv_logging=True \
     framework.tensorboard_logging=True \
+    framework.use_vae=True \
     ddp.num_devices=1 \
-    ddp.master_port='29511'
+    ddp.master_port='29512'

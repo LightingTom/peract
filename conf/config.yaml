@@ -43,6 +43,7 @@ framework:
     num_weights_to_keep: 60 # older checkpoints will be deleted chronologically
     num_workers: 0
     record_every_n: 5
+    use_vae: False
 
 defaults:
     - method: PERACT_BC

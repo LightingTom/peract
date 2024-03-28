@@ -354,8 +354,7 @@ def fill_replay(cfg: DictConfig,
             variation_number=-1, task_name=task,
             obs_config=obs_config,
             random_selection=False,
-            from_episode_number=d_idx,
-            name='ori_obs')[0]
+            from_episode_number=d_idx)[0]
         # load the target image
         # randomly get a new directory
         tar_demo_list = []
@@ -368,8 +367,7 @@ def fill_replay(cfg: DictConfig,
                     variation_number=-1, task_name=task,
                     obs_config=obs_config,
                     random_selection=False,
-                    from_episode_number=i,
-                    name='tar_obs')[0]
+                    from_episode_number=i)[0]
             tar_demo_list.append(target)
 
         descs = demo._observations[0].misc['descriptions']
@@ -510,6 +508,7 @@ def create_agent(cfg: DictConfig):
     LATENT_SIZE = 64
     depth_0bounds = cfg.rlbench.scene_bounds
     cam_resolution = cfg.rlbench.camera_resolution
+    use_vae = cfg.framework.use_vae
 
     num_rotation_classes = int(360. // cfg.method.rotation_resolution)
     qattention_agents = []
@@ -586,7 +585,8 @@ def create_agent(cfg: DictConfig):
             masking_ratio=cfg.method.masking_ratio,
             masking_type=cfg.method.masking_type,
             input_masking_ratio=cfg.method.input_masking_ratio,
-            train_with_seen_objects=cfg.method.train_with_seen_objects
+            train_with_seen_objects=cfg.method.train_with_seen_objects,
+            vae=use_vae
         )
         qattention_agents.append(qattention_agent)
 

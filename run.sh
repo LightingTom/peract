@@ -3,7 +3,7 @@
     python train.py \
     method.name=PERACT_BC \
     rlbench.tasks=[open_drawer] \
-    rlbench.task_name='fct1_0116' \
+    rlbench.task_name='vae_final_noenc' \
     rlbench.cameras=[front,left_shoulder,right_shoulder,wrist] \
     rlbench.demos=10 \
     rlbench.demo_path=$PERACT_ROOT/data/ \
@@ -33,6 +33,6 @@
     framework.load_existing_weights=False \
     framework.csv_logging=True \
     framework.tensorboard_logging=True \
+    framework.use_vae=True \
     ddp.num_devices=1 \
-    ddp.master_port='29509'
-
+    ddp.master_port='29511'

@@ -21,6 +21,9 @@ from einops import rearrange
 from helpers.clip.core.clip import build_model, load_clip
 from torchvision.utils import save_image
 
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+
 import transformers
 from helpers.optim.lamb import Lamb
 from patchify import patchify, unpatchify
@@ -80,7 +83,7 @@ class QFunction(nn.Module):
                 bounds=None, prev_bounds=None, prev_layer_voxel_grid=None,
                 generate=0, noisy_voxel_grid=None, masked_decoding=False,
                 masking_ratio=0.8, input_masking_ratio=0.5, masking_type='patch', noise=None,
-                add_noise=True):
+                vae=True, enc=True):
         # rgb_pcd will be list of list (list of [rgb, pcd])
 
         b = rgb_pcd[0][0].shape[0]
@@ -154,8 +157,8 @@ class QFunction(nn.Module):
         q_trans, \
         q_rot_and_grip, \
         q_ignore_collisions, voxel_reconstructed,\
-        x_mean, x_var, \
-        x_mean_init, x_var_init = self._qnet(
+        vae_mean, vae_var,\
+        x_mean, x_var = self._qnet(
             voxel_grid_masked if masked_decoding else voxel_grid,
             proprio,
             lang_goal_emb,
@@ -165,14 +168,15 @@ class QFunction(nn.Module):
             prev_bounds,
             generate=generate,
             noise=noise,
-            add_noise=add_noise)
+            vae=vae,
+            enc=enc)
 
         # if generate:
         #     voxel_grid = voxel_reconstructed
 
         return q_trans, q_rot_and_grip, q_ignore_collisions, voxel_grid, \
-               voxel_grid_masked, voxel_reconstructed, tar_voxel_grid, x_mean, x_var, \
-               x_mean_init, x_var_init
+               voxel_grid_masked, voxel_reconstructed, tar_voxel_grid, \
+               vae_mean, vae_var, x_mean, x_var
 
 
 class QAttentionPerActBCAgent(Agent):
@@ -212,6 +216,7 @@ class QAttentionPerActBCAgent(Agent):
                  masking_type='patch',
                  input_masking_ratio=0.5,
                  train_with_seen_objects=False,
+                 vae=False
                  ):
         self._layer = layer
         self._coordinate_bounds = coordinate_bounds
@@ -257,6 +262,7 @@ class QAttentionPerActBCAgent(Agent):
         self._l2_loss = nn.MSELoss(reduction='mean')
         self._bce_loss = nn.BCEWithLogitsLoss(reduction='mean')
         self._name = NAME + '_layer' + str(self._layer)
+        self._vae = vae
 
     def build(self, training: bool, device: torch.device = None):
         self._training = training
@@ -381,7 +387,7 @@ class QAttentionPerActBCAgent(Agent):
                              align_corners=True)
         return crop
 
-    def _preprocess_inputs(self, replay_sample, choice):
+    def _preprocess_inputs(self, replay_sample, vae):
         obs = []
         pcds = []
 
@@ -391,8 +397,13 @@ class QAttentionPerActBCAgent(Agent):
         for n in self._camera_names:
             rgb = replay_sample['%s_rgb' % n]
             pcd = replay_sample['%s_point_cloud' % n]
-            tar_rgb = replay_sample['tar_%s_rgb' % n]
-            tar_pcd = replay_sample['tar_%s_point_cloud' % n]
+            if vae:
+                tar_rgb = rgb.clone().detach()
+                tar_pcd = pcd.clone().detach()
+                # print('equal:', torch.equal(rgb, tar_rgb))
+            else:
+                tar_rgb = replay_sample['tar_%s_rgb' % n]
+                tar_pcd = replay_sample['tar_%s_point_cloud' % n]
             # print('rgb:', torch.equal(rgb, tar_rgb))
             # print('pcd:', torch.equal(pcd, tar_pcd))
             # print('ori:', pcd.shape)
@@ -477,13 +488,38 @@ class QAttentionPerActBCAgent(Agent):
             pcd_flat, coord_features=flat_imag_features, coord_bounds=bounds)
         return voxel_grid.permute(0, 4, 1, 2, 3).detach()
 
+    def visualize_latent_space(self, mean, var, step, enc):
+        # print('enc:', enc)
+        np_mean = np.squeeze(mean.clone().detach().cpu().numpy(), axis=-1)[0]
+        np_var = np.squeeze(var.clone().detach().cpu().numpy(), axis=-1)[0]
+        if enc:
+            np_var = np.exp(np_var)
+        # print('mean:', np_mean.shape)
+        # print('var:', np_var.shape)
+        covariance = np_var * np.identity(64)
+        samples = np.random.multivariate_normal(np_mean, covariance, 1000)
+        pca = PCA(n_components=3)
+        reduced_samples = pca.fit_transform(samples)
+        fig = plt.figure(figsize=(10, 7))
+        ax = fig.add_subplot(111, projection='3d')
+
+        ax.scatter(reduced_samples[:, 0], reduced_samples[:, 1], reduced_samples[:, 2],
+                   c='blue', marker='o', alpha=0.5)
+
+        ax.set_title('Latent space in 3D')
+        plt.savefig('%d.png' % step)
+
     def update(self, step: int, replay_sample: dict) -> dict:
+        # print('step:', step)
+
         num_demos = 10
         choice = random.randint(0, num_demos - 2)
+        # this four is for target (output) img
         trans = replay_sample['trans_action_indicies'].permute(1, 0, 2)
         rot = replay_sample['rot_grip_action_indicies'].permute(1, 0, 2)
         gripper = replay_sample['gripper_pose'].permute(1, 0, 2)
         ig_col = replay_sample['ignore_collisions'].permute(1, 0, 2)
+
         action_trans = trans[choice][:, self._layer * 3:self._layer * 3 + 3].int()
         action_rot_grip = rot[choice].int()
         action_gripper_pose = gripper[choice]
@@ -516,7 +552,10 @@ class QAttentionPerActBCAgent(Agent):
         for cname in self._camera_names:
             replay_sample['tar_%s_rgb' % cname] = replay_sample['tar_%s_rgb' % cname].permute(1, 0, 2, 3, 4)[choice]
             replay_sample['tar_%s_point_cloud' % cname] = replay_sample['tar_%s_point_cloud' % cname].permute(1, 0, 2, 3, 4)[choice]
-        obs, pcd, tar_obs, tar_pcd = self._preprocess_inputs(replay_sample, choice)
+
+        # if we use VAE encoder
+        enc = False
+        obs, pcd, tar_obs, tar_pcd = self._preprocess_inputs(replay_sample, enc)
 
         # batch size
         bs = pcd[0].shape[0]
@@ -554,8 +593,8 @@ class QAttentionPerActBCAgent(Agent):
         voxel_grid_masked, \
         voxel_reconstructed, \
         tar_voxel_grid,\
-        x_mean, x_var, \
-        x_mean_init, x_var_init = self._q(obs,
+        vae_mean, vae_var,\
+        x_mean, x_var = self._q(obs,
                                  tar_obs,
                                  proprio,
                                  pcd,
@@ -571,7 +610,13 @@ class QAttentionPerActBCAgent(Agent):
                                  masking_type=self.masking_type,
                                  input_masking_ratio=self.input_masking_ratio,
                                  noise=noise,
-                                 add_noise=True)
+                                 vae=self._vae,
+                                 enc=enc)
+
+        # print('use vae:', self._vae)
+        if self._vae and step % 1000 == 0:
+            print('generating latent space')
+            self.visualize_latent_space(vae_mean, vae_var, step, enc)
 
         # print(torch.equal(voxel_grid, tar_voxel_grid))
         if not self.reconstruction3D_pretraining:
@@ -605,9 +650,11 @@ class QAttentionPerActBCAgent(Agent):
                 q_recons_loss += 10 * self._l2_loss(voxel_reconstructed[:, 0:3][~loss_mask],
                                                     tar_voxel_grid[:, 3:6][~loss_mask])
 
+        vae_kl_divergence = 0.5 * torch.sum(-1 - vae_var + torch.exp(vae_var) + vae_mean**2)
+        # print('kl-divergence', vae_kl_divergence.isnan())
         if self.reconstruction3D_pretraining:
             ## skip computing action losses
-            total_loss = q_recons_loss
+            total_loss = q_recons_loss + vae_kl_divergence
 
         else:
             # TODO: add an arg for this, if it works
@@ -671,13 +718,13 @@ class QAttentionPerActBCAgent(Agent):
                                   (q_rot_loss * self._rot_loss_weight * mask) + \
                                   (q_grip_loss * self._grip_loss_weight * mask) + \
                                   (q_collision_loss * self._collision_loss_weight * mask) + \
-                                  (q_recons_loss)
+                                  (q_recons_loss) + (vae_kl_divergence)
             else:
                 combined_losses = (q_trans_loss * self._trans_loss_weight) + \
                                   (q_rot_loss * self._rot_loss_weight) + \
                                   (q_grip_loss * self._grip_loss_weight) + \
                                   (q_collision_loss * self._collision_loss_weight) + \
-                                  (q_recons_loss)
+                                  (q_recons_loss) + (vae_kl_divergence)
 
             total_loss = combined_losses.mean()
 
@@ -695,8 +742,9 @@ class QAttentionPerActBCAgent(Agent):
             self._summaries = {
                 'losses/total_loss': total_loss,
                 'losses/recons_loss': q_recons_loss,
-                'info/x_mean': x_mean,
-                'info/x_var': x_var,
+                'losses/vae_kl_divergence': vae_kl_divergence,
+                'info/x_mean': 0,
+                'info/x_var': 0,
                 'info/ocupied_voxel_pred': (
                         voxel_reconstructed[0, -1] >= 0.5).sum() if voxel_reconstructed != None else 0.,
                 'info/ocupied_voxel': tar_voxel_grid[0, -1].sum(),
@@ -715,10 +763,10 @@ class QAttentionPerActBCAgent(Agent):
                 'losses/grip_loss': q_grip_loss.mean() if with_rot_and_grip else 0.,
                 'losses/collision_loss': q_collision_loss.mean() if with_rot_and_grip else 0.,
                 'losses/recons_loss': q_recons_loss,
-                'info/x_mean_1': x_mean_init,
-                'info/x_var_1': x_var_init,
-                'info/x_mean_2': x_mean,
-                'info/x_var_2': x_var,
+                'info/x_mean_1': 0,
+                'info/x_var_1': 0,
+                'info/x_mean_2': 0,
+                'info/x_var_2': 0,
                 'info/ocupied_voxel_pred': (
                         voxel_reconstructed[0, -1] >= 0.5).sum() if voxel_reconstructed != None else 0.,
                 'info/ocupied_voxel': tar_voxel_grid[0, -1].sum(),
@@ -1175,14 +1223,14 @@ class QAttentionPerActBCAgent(Agent):
             summaries.extend([
                 ImageSummary('%s/crops/%s' % (self._name, name), crops)])
 
-        for tag, param in self._q.named_parameters():
-            # assert not torch.isnan(param.grad.abs() <= 1.0).all()
-            summaries.append(
-                HistogramSummary('%s/gradient/%s' % (self._name, tag),
-                                 param.grad))
-            summaries.append(
-                HistogramSummary('%s/weight/%s' % (self._name, tag),
-                                 param.data))
+        # for tag, param in self._q.named_parameters():
+        #     # assert not torch.isnan(param.grad.abs() <= 1.0).all()
+        #     summaries.append(
+        #         HistogramSummary('%s/gradient/%s' % (self._name, tag),
+        #                          param.grad))
+        #     summaries.append(
+        #         HistogramSummary('%s/weight/%s' % (self._name, tag),
+        #                          param.data))
 
         return summaries
 
