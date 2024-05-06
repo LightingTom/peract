@@ -415,10 +415,18 @@ class QAttentionPerActBCAgent(Agent):
         return obs, pcds, tar_obs, tar_pcds
 
     def _act_preprocess_inputs(self, observation):
+        # observation keys:
+        # 'left_shoulder_rgb', 'left_shoulder_point_cloud', 'right_shoulder_rgb', 'right_shoulder_point_cloud',
+        # 'wrist_rgb', 'wrist_point_cloud', 'front_rgb', 'front_point_cloud', 'ignore_collisions', 'low_dim_state',
+        # 'left_shoulder_camera_extrinsics', 'left_shoulder_camera_intrinsics', 'right_shoulder_camera_extrinsics',
+        # 'right_shoulder_camera_intrinsics', 'front_camera_extrinsics', 'front_camera_intrinsics', 'wrist_camera_extrinsics',
+        # 'wrist_camera_intrinsics', 'lang_goal_tokens'
+        # print(observation['front_rgb'].shape)
+        # 1,1,3,128,128
         obs, pcds = [], []
         for n in self._camera_names:
-            rgb = observation['%s_rgb' % n]
-            pcd = observation['%s_point_cloud' % n]
+            rgb = observation['%s_rgb' % n].squeeze(0)
+            pcd = observation['%s_point_cloud' % n].squeeze(0)
 
             obs.append([rgb, pcd])
             pcds.append(pcd)
@@ -1062,6 +1070,7 @@ class QAttentionPerActBCAgent(Agent):
         bounds = self._coordinate_bounds
         prev_layer_voxel_grid = observation.get('prev_layer_voxel_grid', None)
         prev_layer_bounds = observation.get('prev_layer_bounds', None)
+        # shape: 1,1,77
         lang_goal_tokens = observation.get('lang_goal_tokens', None).long()
 
         # extract CLIP language embs
@@ -1078,6 +1087,7 @@ class QAttentionPerActBCAgent(Agent):
             proprio = observation['low_dim_state']
 
         obs, pcd = self._act_preprocess_inputs(observation)
+        print(pcd[0].shape)
 
         # correct batch size and device
         obs = [[o[0][0].to(self._device), o[1][0].to(self._device)] for o in obs]
@@ -1095,20 +1105,22 @@ class QAttentionPerActBCAgent(Agent):
         q_ignore_collisions, \
         vox_grid, \
         voxel_grid_masked, \
-        voxel_reconstructed = self._q(obs,
-                                      proprio,
-                                      pcd,
-                                      lang_goal_emb,
-                                      lang_token_embs,
-                                      bounds,
-                                      prev_layer_bounds,
-                                      prev_layer_voxel_grid,
-                                      masked_decoding=self.masked_decoding,
-                                      masking_ratio=self.masking_ratio,
-                                      masking_type=self.masking_type,
-                                      input_masking_ratio=self.input_masking_ratio,
-                                      add_noise=False
-                                      )
+        voxel_reconstructed, \
+        tar_voxel_grid, \
+        vae_mean, vae_var, \
+        x_mean, x_var = self._q(obs,
+                                proprio,
+                                pcd,
+                                lang_goal_emb,
+                                lang_token_embs,
+                                bounds,
+                                prev_layer_bounds,
+                                prev_layer_voxel_grid,
+                                masked_decoding=self.masked_decoding,
+                                masking_ratio=self.masking_ratio,
+                                masking_type=self.masking_type,
+                                input_masking_ratio=self.input_masking_ratio
+                                )
 
         # softmax Q predictions
         q_trans = self._softmax_q_trans(q_trans)
